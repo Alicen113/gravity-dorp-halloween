@@ -1,0 +1,690 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>GRAVITY DROP:HALLOWEEN</title>
+    <style>
+        body {
+            margin: 0;
+            padding: 0;
+            background-color: #06020a;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            height: 100vh;
+            overflow: hidden;
+            touch-action: manipulation;
+            user-select: none;
+            -webkit-user-select: none;
+        }
+
+        #game-container {
+            width: 640px;
+            height: 360px;
+            position: relative;
+            box-shadow: 0 0 45px rgba(255, 102, 0, 0.4);
+            border-radius: 8px;
+            border: 2px solid #ff6600;
+            overflow: hidden;
+            background-color: #12081c;
+        }
+
+        canvas {
+            display: block;
+            width: 100%;
+            height: 100%;
+        }
+
+        #sound-btn {
+            position: absolute;
+            top: 10px;
+            right: 10px;
+            background-color: #240c30;
+            color: #ff6600;
+            border: 2px solid #ff6600;
+            padding: 4px 10px;
+            font-size: 12px;
+            font-weight: bold;
+            border-radius: 4px;
+            cursor: pointer;
+            z-index: 10;
+            outline: none;
+        }
+        #sound-btn:active {
+            background-color: #ff6600;
+            color: #12081c;
+        }
+    </style>
+</head>
+<body>
+
+    <div id="game-container">
+        <button id="sound-btn" onclick="toggleSound(event)">SOUND: ON</button>
+        <canvas id="gameCanvas" width="640" height="360"></canvas>
+    </div>
+
+    <script>
+        // ==========================================
+        // パラメーター設定（★滞空時間を大幅に延長）
+        // ==========================================
+        const CONFIG = {
+            CANVAS_WIDTH: 640,
+            CANVAS_HEIGHT: 360,
+            CEILING_Y: 52,
+            FLOOR_Y: 308,
+            WALL_THICKNESS: 6,
+            
+            PLAYER_X: 110,
+            PLAYER_SIZE: 22,
+            
+            // ★ここを変更：重力を弱め、落下速度上限を落として滞空時間を延長
+            GRAVITY_ACCEL: 0.68,   // 以前の 1.45 から 0.68 に緩和（ふんわり反転）
+            MAX_FALL_SPEED: 9.5,   // 以前の 16 から 9.5 に抑制（急降下・急上昇を防止）
+            
+            SPIKE_WIDTH: 28,
+            SPIKE_HEIGHT: 36,      // 滞空バランスに合わせて適正化
+            STAGE_DURATION_FRAMES: 1800 // 1ステージ約30秒
+        };
+
+        const HELL_STAGES = [
+            {
+                name: "HELL 1",
+                title: "カボチャ墓場",
+                wallColor: "#ff6600",
+                stripeColor: "rgba(255, 102, 0, 0.25)",
+                spikeColor: "#9900cc",
+                baseSpeed: 5.6,
+                spawnInterval: 48
+            },
+            {
+                name: "HELL 2",
+                title: "毒血の魔女回廊",
+                wallColor: "#39ff14",
+                stripeColor: "rgba(57, 255, 20, 0.25)",
+                spikeColor: "#ff0055",
+                baseSpeed: 6.8,
+                spawnInterval: 38
+            },
+            {
+                name: "HELL 3",
+                title: "冥界の終焉トゲ地獄",
+                wallColor: "#ef4444",
+                stripeColor: "rgba(239, 68, 68, 0.35)",
+                spikeColor: "#38bdf8",
+                baseSpeed: 8.2,
+                spawnInterval: 28
+            }
+        ];
+
+        // ==========================================
+        // Web Audio API サウンド＆高速不穏BGM
+        // ==========================================
+        let audioCtx = null;
+        let isSoundEnabled = true;
+        let bgmTimer = null;
+
+        function initAudio() {
+            if (!audioCtx) {
+                audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+            }
+            if (audioCtx.state === 'suspended') {
+                audioCtx.resume();
+            }
+        }
+
+        function toggleSound(e) {
+            e.stopPropagation();
+            isSoundEnabled = !isSoundEnabled;
+            const btn = document.getElementById('sound-btn');
+            btn.textContent = isSoundEnabled ? 'SOUND: ON' : 'SOUND: OFF';
+            btn.style.borderColor = isSoundEnabled ? '#ff6600' : '#555';
+            btn.style.color = isSoundEnabled ? '#ff6600' : '#555';
+
+            if (!isSoundEnabled) {
+                stopBGM();
+            } else if (gameState === 'PLAYING') {
+                startBGM();
+            }
+        }
+
+        function playInvertSound() {
+            if (!isSoundEnabled || !audioCtx) return;
+            const osc = audioCtx.createOscillator();
+            const gain = audioCtx.createGain();
+            osc.type = 'sawtooth';
+            const startTime = audioCtx.currentTime;
+            osc.frequency.setValueAtTime(320, startTime);
+            osc.frequency.exponentialRampToValueAtTime(680, startTime + 0.08);
+            gain.gain.setValueAtTime(0.12, startTime);
+            gain.gain.linearRampToValueAtTime(0.01, startTime + 0.08);
+            osc.connect(gain);
+            gain.connect(audioCtx.destination);
+            osc.start(startTime);
+            osc.stop(startTime + 0.08);
+        }
+
+        function playCrashSound() {
+            if (!isSoundEnabled || !audioCtx) return;
+            const osc = audioCtx.createOscillator();
+            const gain = audioCtx.createGain();
+            osc.type = 'sawtooth';
+            const startTime = audioCtx.currentTime;
+            osc.frequency.setValueAtTime(500, startTime);
+            osc.frequency.exponentialRampToValueAtTime(30, startTime + 0.35);
+            gain.gain.setValueAtTime(0.3, startTime);
+            gain.gain.linearRampToValueAtTime(0.01, startTime + 0.35);
+            osc.connect(gain);
+            gain.connect(audioCtx.destination);
+            osc.start(startTime);
+            osc.stop(startTime + 0.35);
+        }
+
+        const bgmNotes = [
+            { freq: 330, dur: 0.12 }, { freq: 349, dur: 0.12 }, { freq: 392, dur: 0.12 }, { freq: 330, dur: 0.12 },
+            { freq: 440, dur: 0.12 }, { freq: 415, dur: 0.12 }, { freq: 349, dur: 0.12 }, { freq: 293, dur: 0.12 },
+            { freq: 311, dur: 0.12 }, { freq: 330, dur: 0.16 }, { freq: 0, dur: 0.06 }
+        ];
+        let currentNoteIndex = 0;
+
+        function playBGMStep() {
+            if (!isSoundEnabled || !audioCtx || gameState !== 'PLAYING') return;
+
+            const tempo = 1.25 + (currentStageIndex * 0.2);
+            const note = bgmNotes[currentNoteIndex];
+            currentNoteIndex = (currentNoteIndex + 1) % bgmNotes.length;
+
+            if (note.freq > 0) {
+                const osc = audioCtx.createOscillator();
+                const gain = audioCtx.createGain();
+                osc.type = 'square';
+                const startTime = audioCtx.currentTime;
+                const dur = note.dur / tempo;
+
+                osc.frequency.setValueAtTime(note.freq * tempo, startTime);
+                gain.gain.setValueAtTime(0.035, startTime);
+                gain.gain.linearRampToValueAtTime(0.001, startTime + dur);
+
+                osc.connect(gain);
+                gain.connect(audioCtx.destination);
+                osc.start(startTime);
+                osc.stop(startTime + dur);
+            }
+
+            bgmTimer = setTimeout(playBGMStep, (note.dur / tempo) * 1000);
+        }
+
+        function startBGM() {
+            stopBGM();
+            currentNoteIndex = 0;
+            playBGMStep();
+        }
+
+        function stopBGM() {
+            if (bgmTimer) {
+                clearTimeout(bgmTimer);
+                bgmTimer = null;
+            }
+        }
+
+        // ==========================================
+        // ゲーム変数
+        // ==========================================
+        const canvas = document.getElementById('gameCanvas');
+        const ctx = canvas.getContext('2d');
+
+        let gameState = 'TITLE';
+        let currentStageIndex = 0;
+        let totalPlayTime = 0.0;
+
+        let player = {
+            y: CONFIG.FLOOR_Y - CONFIG.PLAYER_SIZE,
+            vy: 0,
+            gravityDirection: 1,
+            trail: []
+        };
+
+        let spikes = [];
+        let particles = [];
+        let stageProgressFrames = 0;
+        let goalGate = null;
+        let scrollOffset = 0;
+        let screenShake = 0;
+
+        // ==========================================
+        // エフェクト生成
+        // ==========================================
+        function createInvertParticles(x, y, dir) {
+            for (let i = 0; i < 9; i++) {
+                particles.push({
+                    x: x + CONFIG.PLAYER_SIZE / 2,
+                    y: y + CONFIG.PLAYER_SIZE / 2,
+                    vx: (Math.random() - 0.5) * 4 - 3,
+                    vy: dir * (Math.random() * 4 + 2),
+                    color: Math.random() > 0.5 ? '#39ff14' : '#ff6600',
+                    size: Math.random() * 4 + 2,
+                    alpha: 1.0,
+                    decay: 0.04
+                });
+            }
+        }
+
+        function createCrashParticles(x, y) {
+            for (let i = 0; i < 28; i++) {
+                particles.push({
+                    x: x + CONFIG.PLAYER_SIZE / 2,
+                    y: y + CONFIG.PLAYER_SIZE / 2,
+                    vx: (Math.random() - 0.5) * 11,
+                    vy: (Math.random() - 0.5) * 11,
+                    color: Math.random() > 0.3 ? '#ef4444' : '#ff6600',
+                    size: Math.random() * 6 + 3,
+                    alpha: 1.0,
+                    decay: 0.028
+                });
+            }
+        }
+
+        // ==========================================
+        // 更新処理
+        // ==========================================
+        function update() {
+            const stage = HELL_STAGES[currentStageIndex];
+            scrollOffset = (scrollOffset + stage.baseSpeed) % 40;
+
+            if (screenShake > 0) screenShake--;
+
+            for (let i = particles.length - 1; i >= 0; i--) {
+                const p = particles[i];
+                p.x += p.vx;
+                p.y += p.vy;
+                p.alpha -= p.decay;
+                if (p.alpha <= 0) particles.splice(i, 1);
+            }
+
+            if (gameState !== 'PLAYING') return;
+
+            totalPlayTime += 1 / 60;
+            stageProgressFrames++;
+
+            // 1. 重力と滞空物理演算
+            player.vy += CONFIG.GRAVITY_ACCEL * player.gravityDirection;
+            if (player.vy > CONFIG.MAX_FALL_SPEED) player.vy = CONFIG.MAX_FALL_SPEED;
+            if (player.vy < -CONFIG.MAX_FALL_SPEED) player.vy = -CONFIG.MAX_FALL_SPEED;
+
+            player.y += player.vy;
+
+            // 天井・床判定
+            const minY = CONFIG.CEILING_Y;
+            const maxY = CONFIG.FLOOR_Y - CONFIG.PLAYER_SIZE;
+
+            if (player.y <= minY) {
+                player.y = minY;
+                player.vy = 0;
+            } else if (player.y >= maxY) {
+                player.y = maxY;
+                player.vy = 0;
+            }
+
+            // 残像
+            player.trail.unshift({ y: player.y });
+            if (player.trail.length > 5) player.trail.pop();
+
+            // 2. トゲ生成
+            if (stageProgressFrames < CONFIG.STAGE_DURATION_FRAMES - 160) {
+                if (stageProgressFrames % stage.spawnInterval === 0) {
+                    const r = Math.random();
+
+                    if (r < 0.25) {
+                        // 挟み込みトゲ（空中滞空で隙間を抜ける）
+                        spikes.push({ x: CONFIG.CANVAS_WIDTH, position: 'floor' });
+                        spikes.push({ x: CONFIG.CANVAS_WIDTH, position: 'ceiling' });
+                    } else if (r < 0.62) {
+                        spikes.push({ x: CONFIG.CANVAS_WIDTH, position: 'floor' });
+                    } else {
+                        spikes.push({ x: CONFIG.CANVAS_WIDTH, position: 'ceiling' });
+                    }
+                }
+            }
+
+            // 3. ゴール生成
+            if (stageProgressFrames === CONFIG.STAGE_DURATION_FRAMES && !goalGate) {
+                goalGate = {
+                    x: CONFIG.CANVAS_WIDTH,
+                    y: CONFIG.CEILING_Y,
+                    w: 36,
+                    h: CONFIG.FLOOR_Y - CONFIG.CEILING_Y
+                };
+            }
+
+            // 4. 移動
+            for (let i = spikes.length - 1; i >= 0; i--) {
+                spikes[i].x -= stage.baseSpeed;
+                if (spikes[i].x + CONFIG.SPIKE_WIDTH < 0) {
+                    spikes.splice(i, 1);
+                }
+            }
+
+            if (goalGate) goalGate.x -= stage.baseSpeed;
+
+            // 5. 当たり判定（AABB）
+            const px = CONFIG.PLAYER_X + 2;
+            const py = player.y + 2;
+            const pw = CONFIG.PLAYER_SIZE - 4;
+            const ph = CONFIG.PLAYER_SIZE - 4;
+
+            for (let s of spikes) {
+                let sx = s.x + 2;
+                let sw = CONFIG.SPIKE_WIDTH - 4;
+                let sy, sh;
+
+                if (s.position === 'floor') {
+                    sy = CONFIG.FLOOR_Y - CONFIG.SPIKE_HEIGHT;
+                    sh = CONFIG.SPIKE_HEIGHT;
+                } else {
+                    sy = CONFIG.CEILING_Y;
+                    sh = CONFIG.SPIKE_HEIGHT;
+                }
+
+                if (px < sx + sw && px + pw > sx && py < sy + sh && py + ph > sy) {
+                    gameState = 'GAMEOVER';
+                    screenShake = 16;
+                    createCrashParticles(CONFIG.PLAYER_X, player.y);
+                    playCrashSound();
+                    stopBGM();
+                    return;
+                }
+            }
+
+            // 6. ゴール到達判定
+            if (goalGate) {
+                if (px < goalGate.x + goalGate.w && px + pw > goalGate.x &&
+                    py < goalGate.y + goalGate.h && py + ph > goalGate.y) {
+                    
+                    stopBGM();
+                    if (currentStageIndex >= HELL_STAGES.length - 1) {
+                        gameState = 'ALL_CLEAR';
+                    } else {
+                        gameState = 'STAGE_CLEAR';
+                    }
+                }
+            }
+        }
+
+        // ==========================================
+        // 描画処理
+        // ==========================================
+        function draw() {
+            ctx.save();
+
+            if (screenShake > 0) {
+                const sx = (Math.random() - 0.5) * 8;
+                const sy = (Math.random() - 0.5) * 8;
+                ctx.translate(sx, sy);
+            }
+
+            ctx.clearRect(0, 0, CONFIG.CANVAS_WIDTH, CONFIG.CANVAS_HEIGHT);
+            const stage = HELL_STAGES[currentStageIndex];
+
+            // 背景
+            const bgGrad = ctx.createLinearGradient(0, 0, 0, CONFIG.CANVAS_HEIGHT);
+            bgGrad.addColorStop(0, '#10051a');
+            bgGrad.addColorStop(1, '#240833');
+            ctx.fillStyle = bgGrad;
+            ctx.fillRect(0, 0, CONFIG.CANVAS_WIDTH, CONFIG.CANVAS_HEIGHT);
+
+            ctx.fillStyle = 'rgba(255, 60, 0, 0.2)';
+            ctx.beginPath();
+            ctx.arc(540, 75, 42, 0, Math.PI * 2);
+            ctx.fill();
+
+            // 1. 通路（天井・床）
+            ctx.strokeStyle = stage.wallColor;
+            ctx.lineWidth = CONFIG.WALL_THICKNESS;
+
+            ctx.beginPath();
+            ctx.moveTo(0, CONFIG.CEILING_Y);
+            ctx.lineTo(CONFIG.CANVAS_WIDTH, CONFIG.CEILING_Y);
+            ctx.stroke();
+
+            ctx.beginPath();
+            ctx.moveTo(0, CONFIG.FLOOR_Y);
+            ctx.lineTo(CONFIG.CANVAS_WIDTH, CONFIG.FLOOR_Y);
+            ctx.stroke();
+
+            // スクロールストライプ
+            ctx.fillStyle = stage.stripeColor;
+            for (let x = -scrollOffset; x < CONFIG.CANVAS_WIDTH; x += 36) {
+                ctx.fillRect(x, CONFIG.CEILING_Y - 14, 18, 10);
+                ctx.fillRect(x, CONFIG.FLOOR_Y + 4, 18, 10);
+            }
+
+            // 2. ゴールゲート
+            if (goalGate && gameState !== 'TITLE') {
+                ctx.fillStyle = '#facc15';
+                ctx.fillRect(goalGate.x, goalGate.y, goalGate.w, goalGate.h);
+                ctx.strokeStyle = '#ffffff';
+                ctx.lineWidth = 3;
+                ctx.strokeRect(goalGate.x, goalGate.y, goalGate.w, goalGate.h);
+
+                ctx.fillStyle = '#0f172a';
+                ctx.font = 'bold 12px sans-serif';
+                ctx.textAlign = 'center';
+                ctx.save();
+                ctx.translate(goalGate.x + goalGate.w / 2, CONFIG.CANVAS_HEIGHT / 2);
+                ctx.rotate(Math.PI / 2);
+                ctx.fillText('ESCAPE', 0, 4);
+                ctx.restore();
+            }
+
+            // 3. トゲ
+            ctx.fillStyle = stage.spikeColor;
+            for (let s of spikes) {
+                ctx.beginPath();
+                if (s.position === 'floor') {
+                    ctx.moveTo(s.x, CONFIG.FLOOR_Y);
+                    ctx.lineTo(s.x + CONFIG.SPIKE_WIDTH / 2, CONFIG.FLOOR_Y - CONFIG.SPIKE_HEIGHT);
+                    ctx.lineTo(s.x + CONFIG.SPIKE_WIDTH, CONFIG.FLOOR_Y);
+                } else {
+                    ctx.moveTo(s.x, CONFIG.CEILING_Y);
+                    ctx.lineTo(s.x + CONFIG.SPIKE_WIDTH / 2, CONFIG.CEILING_Y + CONFIG.SPIKE_HEIGHT);
+                    ctx.lineTo(s.x + CONFIG.SPIKE_WIDTH, CONFIG.CEILING_Y);
+                }
+                ctx.closePath();
+                ctx.fill();
+            }
+
+            // 4. 残像
+            if (gameState === 'PLAYING') {
+                player.trail.forEach((t, i) => {
+                    ctx.fillStyle = `rgba(255, 102, 0, ${0.35 - i * 0.06})`;
+                    ctx.fillRect(CONFIG.PLAYER_X - (i + 1) * 7, t.y, CONFIG.PLAYER_SIZE, CONFIG.PLAYER_SIZE);
+                });
+            }
+
+            // 5. パーティクル
+            for (let p of particles) {
+                ctx.fillStyle = p.color;
+                ctx.globalAlpha = p.alpha;
+                ctx.fillRect(p.x, p.y, p.size, p.size);
+            }
+            ctx.globalAlpha = 1.0;
+
+            // 6. プレイヤー（ジャック・オ・ランタン）
+            if (gameState !== 'GAMEOVER') {
+                ctx.fillStyle = '#ff6600';
+                ctx.fillRect(CONFIG.PLAYER_X, player.y, CONFIG.PLAYER_SIZE, CONFIG.PLAYER_SIZE);
+
+                // ヘタ
+                ctx.fillStyle = '#39ff14';
+                ctx.fillRect(CONFIG.PLAYER_X + CONFIG.PLAYER_SIZE / 2 - 2, player.y - 3, 4, 3);
+
+                // 顔
+                ctx.fillStyle = '#12081c';
+                ctx.fillRect(CONFIG.PLAYER_X + 4, player.y + 6, 4, 5);
+                ctx.fillRect(CONFIG.PLAYER_X + 13, player.y + 6, 4, 5);
+                ctx.fillRect(CONFIG.PLAYER_X + 6, player.y + 14, 9, 3);
+            }
+
+            // 7. UI表示
+            if (gameState === 'PLAYING') {
+                ctx.fillStyle = '#ff6600';
+                ctx.font = 'bold 15px sans-serif';
+                ctx.textAlign = 'left';
+                ctx.fillText(`${stage.name} : ${stage.title}`, 20, 32);
+
+                const dirSymbol = player.gravityDirection === 1 ? '▼ DOWN' : '▲ UP';
+                ctx.fillStyle = '#39ff14';
+                ctx.fillText(`GRAVITY: ${dirSymbol}`, 240, 32);
+
+                const ratio = Math.min(stageProgressFrames / CONFIG.STAGE_DURATION_FRAMES, 1.0);
+                const bw = 130;
+                ctx.strokeStyle = 'rgba(255, 255, 255, 0.3)';
+                ctx.strokeRect(CONFIG.CANVAS_WIDTH - bw - 20, 22, bw, 8);
+                ctx.fillStyle = stage.wallColor;
+                ctx.fillRect(CONFIG.CANVAS_WIDTH - bw - 20, 22, bw * ratio, 8);
+            }
+
+            // タイトル
+            if (gameState === 'TITLE') {
+                ctx.fillStyle = 'rgba(6, 2, 10, 0.92)';
+                ctx.fillRect(0, 0, CONFIG.CANVAS_WIDTH, CONFIG.CANVAS_HEIGHT);
+
+                ctx.fillStyle = '#ff6600';
+                ctx.font = 'bold 36px sans-serif';
+                ctx.textAlign = 'center';
+                ctx.fillText('GRAVITY DROP: HALLOWEEN', CONFIG.CANVAS_WIDTH / 2, CONFIG.CANVAS_HEIGHT / 2 - 40);
+
+                ctx.fillStyle = '#f8fafc';
+                ctx.font = '14px sans-serif';
+                ctx.fillText('ワンクリックで反転！ 空中でテンポよく浮遊してトゲを突破せよ', CONFIG.CANVAS_WIDTH / 2, CONFIG.CANVAS_HEIGHT / 2);
+
+                ctx.fillStyle = '#facc15';
+                ctx.font = 'bold 15px sans-serif';
+                ctx.fillText('クリック または スペースキーでスタート', CONFIG.CANVAS_WIDTH / 2, CONFIG.CANVAS_HEIGHT / 2 + 50);
+            }
+
+            // ゲームオーバー
+            if (gameState === 'GAMEOVER') {
+                ctx.fillStyle = 'rgba(6, 2, 10, 0.92)';
+                ctx.fillRect(0, 0, CONFIG.CANVAS_WIDTH, CONFIG.CANVAS_HEIGHT);
+
+                ctx.fillStyle = '#ef4444';
+                ctx.font = 'bold 34px sans-serif';
+                ctx.textAlign = 'center';
+                ctx.fillText('CRUSHED IN HELL', CONFIG.CANVAS_WIDTH / 2, CONFIG.CANVAS_HEIGHT / 2 - 35);
+
+                const percent = Math.floor((stageProgressFrames / CONFIG.STAGE_DURATION_FRAMES) * 100);
+                ctx.fillStyle = '#f8fafc';
+                ctx.font = '16px sans-serif';
+                ctx.fillText(`${stage.name} 到達度: ${Math.min(percent, 99)}%`, CONFIG.CANVAS_WIDTH / 2, CONFIG.CANVAS_HEIGHT / 2 + 5);
+
+                ctx.fillStyle = '#ff6600';
+                ctx.font = 'bold 15px sans-serif';
+                ctx.fillText('クリック または スペースキーでリトライ', CONFIG.CANVAS_WIDTH / 2, CONFIG.CANVAS_HEIGHT / 2 + 50);
+            }
+
+            // ステージクリア
+            if (gameState === 'STAGE_CLEAR') {
+                ctx.fillStyle = 'rgba(6, 2, 10, 0.92)';
+                ctx.fillRect(0, 0, CONFIG.CANVAS_WIDTH, CONFIG.CANVAS_HEIGHT);
+
+                ctx.fillStyle = '#39ff14';
+                ctx.font = 'bold 32px sans-serif';
+                ctx.textAlign = 'center';
+                ctx.fillText(`${stage.name} SURVIVED!`, CONFIG.CANVAS_WIDTH / 2, CONFIG.CANVAS_HEIGHT / 2 - 25);
+
+                ctx.fillStyle = '#f8fafc';
+                ctx.font = '16px sans-serif';
+                const nextName = HELL_STAGES[currentStageIndex + 1].name;
+                ctx.fillText(`クリック または スペースキーで ${nextName} へ`, CONFIG.CANVAS_WIDTH / 2, CONFIG.CANVAS_HEIGHT / 2 + 35);
+            }
+
+            // 全ステージ制覇
+            if (gameState === 'ALL_CLEAR') {
+                ctx.fillStyle = 'rgba(6, 2, 10, 0.94)';
+                ctx.fillRect(0, 0, CONFIG.CANVAS_WIDTH, CONFIG.CANVAS_HEIGHT);
+
+                ctx.fillStyle = '#39ff14';
+                ctx.font = 'bold 36px sans-serif';
+                ctx.textAlign = 'center';
+                ctx.fillText('HELL CONQUERED!', CONFIG.CANVAS_WIDTH / 2, CONFIG.CANVAS_HEIGHT / 2 - 40);
+
+                ctx.fillStyle = '#f8fafc';
+                ctx.font = '18px sans-serif';
+                ctx.fillText(`総合踏破タイム: ${totalPlayTime.toFixed(1)} 秒`, CONFIG.CANVAS_WIDTH / 2, CONFIG.CANVAS_HEIGHT / 2 + 5);
+
+                ctx.fillStyle = '#facc15';
+                ctx.font = 'bold 15px sans-serif';
+                ctx.fillText('クリック または スペースキーでタイトルへ', CONFIG.CANVAS_WIDTH / 2, CONFIG.CANVAS_HEIGHT / 2 + 55);
+            }
+
+            ctx.restore();
+        }
+
+        function loop() {
+            update();
+            draw();
+            requestAnimationFrame(loop);
+        }
+
+        // ==========================================
+        // リセット・操作処理
+        // ==========================================
+        function resetStage(isNext = false) {
+            if (isNext) currentStageIndex++;
+            player.y = CONFIG.FLOOR_Y - CONFIG.PLAYER_SIZE;
+            player.vy = 0;
+            player.gravityDirection = 1;
+            player.trail = [];
+            spikes = [];
+            particles = [];
+            goalGate = null;
+            stageProgressFrames = 0;
+            gameState = 'PLAYING';
+            if (isSoundEnabled) startBGM();
+        }
+
+        function resetAllGame() {
+            currentStageIndex = 0;
+            totalPlayTime = 0.0;
+            resetStage(false);
+            gameState = 'TITLE';
+        }
+
+        function handleInput(e) {
+            if (e) e.preventDefault();
+
+            initAudio();
+
+            switch (gameState) {
+                case 'TITLE':
+                    resetStage(false);
+                    break;
+                case 'PLAYING':
+                    player.gravityDirection *= -1;
+                    createInvertParticles(CONFIG.PLAYER_X, player.y, player.gravityDirection);
+                    playInvertSound();
+                    break;
+                case 'GAMEOVER':
+                    resetStage(false);
+                    break;
+                case 'STAGE_CLEAR':
+                    resetStage(true);
+                    break;
+                case 'ALL_CLEAR':
+                    resetAllGame();
+                    break;
+            }
+        }
+
+        window.addEventListener('keydown', (e) => {
+            if (e.code === 'Space') {
+                handleInput(e);
+            }
+        });
+        canvas.addEventListener('pointerdown', handleInput);
+
+        loop();
+    </script>
+</body>
+</html>
